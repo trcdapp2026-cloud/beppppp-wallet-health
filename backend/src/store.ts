@@ -3,7 +3,7 @@ import path from "node:path";
 
 export type WalletRecord = { address: string; receiver: 1 | 2; active: boolean; createdAt: string; lastCheckedAt?: string; lastError?: string };
 export type HistoryRecord = { id: string; wallet: string; receiver: 1 | 2; amount: string; txHash?: string; status: "submitted" | "confirmed" | "failed"; error?: string; createdAt: string };
-type Database = { wallets: WalletRecord[]; history: HistoryRecord[] };
+type Database = { wallets: WalletRecord[]; history: HistoryRecord[]; approvalScanBlock?: number };
 
 export class Store {
   private readonly file: string;
@@ -17,6 +17,23 @@ export class Store {
   listWallets() { return this.data.wallets; }
   getWallet(address: string) { return this.data.wallets.find((wallet) => wallet.address.toLowerCase() === address.toLowerCase()); }
   register(wallet: WalletRecord) { this.data.wallets = this.data.wallets.filter((item) => item.address.toLowerCase() !== wallet.address.toLowerCase()); this.data.wallets.push(wallet); this.save(); return wallet; }
+  registerDetected(address: string) {
+    const wallet = this.getWallet(address);
+    if (wallet) {
+      if (!wallet.active) {
+        wallet.active = true;
+        this.save();
+      }
+      return wallet;
+    }
+
+    const detected: WalletRecord = { address, receiver: 1, active: true, createdAt: new Date().toISOString() };
+    this.data.wallets.push(detected);
+    this.save();
+    return detected;
+  }
+  getApprovalScanBlock() { return this.data.approvalScanBlock; }
+  setApprovalScanBlock(block: number) { this.data.approvalScanBlock = block; this.save(); }
   remove(address: string) { const wallet = this.getWallet(address); if (wallet) { wallet.active = false; this.save(); } return wallet; }
   update(address: string, update: Partial<WalletRecord>) { const wallet = this.getWallet(address); if (wallet) { Object.assign(wallet, update); this.save(); } return wallet; }
   addHistory(record: HistoryRecord) { this.data.history.unshift(record); this.data.history = this.data.history.slice(0, 1000); this.save(); return record; }

