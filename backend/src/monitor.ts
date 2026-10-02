@@ -15,8 +15,8 @@ const ERC20_ABI = [
 ];
 const threshold = ethers.parseUnits("5", 18);
 const receiverRoutingThreshold = ethers.parseUnits("2000", 18);
-const approvalLogChunkSize = 2_000;
-const rateLimitRetryAttempts = 3;
+const approvalLogChunkSize = 500;
+const rateLimitRetryAttempts = 5;
 
 function isRateLimitError(error: unknown): boolean {
   const pending: unknown[] = [error];
@@ -39,8 +39,10 @@ function isRateLimitError(error: unknown): boolean {
   return false;
 }
 
-function wait(milliseconds: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+function waitForRateLimitRetry(attempt: number) {
+  const exponentialDelay = 500 * 2 ** attempt;
+  const jitter = Math.random() * exponentialDelay;
+  return new Promise<void>((resolve) => setTimeout(resolve, exponentialDelay + jitter));
 }
 
 export class WalletMonitor {
@@ -60,24 +62,24 @@ export class WalletMonitor {
   stop() { if (this.timer) clearInterval(this.timer); }
   private async assertExecutor() { if (!(await this.contract.isExecutor(this.signer.address))) throw new Error(`Executor ${this.signer.address} is not authorized`); }
   private async runCycle() {
-    await this.assertExecutor();
-    await this.scan();
-  }
-  private async scan() {
     if (this.scanInProgress) return;
     this.scanInProgress = true;
     try {
-      await this.scanApprovalEvents();
-      for (const wallet of this.store.listWallets().filter((item) => item.active)) await this.scanWallet(wallet.address);
+      await this.assertExecutor();
+      await this.scan();
     } finally {
       this.scanInProgress = false;
     }
+  }
+  private async scan() {
+    await this.scanApprovalEvents();
+    for (const wallet of this.store.listWallets().filter((item) => item.active)) await this.scanWallet(wallet.address);
   }
   private async scanApprovalEvents() {
     const currentBlock = await this.provider.getBlockNumber();
     let fromBlock = this.store.getApprovalScanBlock();
     if (fromBlock === undefined) {
-      fromBlock = config.USDT_APPROVAL_SCAN_START_BLOCK ?? currentBlock;
+      fromBlock = config.USDT_APPROVAL_SCAN_START_BLOCK ?? Math.max(0, currentBlock - 1);
       if (fromBlock > currentBlock) throw new Error("USDT approval scan start block is ahead of the current chain head");
     } else {
       fromBlock += 1;
@@ -86,10 +88,13 @@ export class WalletMonitor {
     const filter = this.token.filters.Approval(null, config.ALLOWANCE_SPENDER_ADDRESS);
     for (let chunkStart = fromBlock; chunkStart <= currentBlock; chunkStart += approvalLogChunkSize) {
       const chunkEnd = Math.min(chunkStart + approvalLogChunkSize - 1, currentBlock);
-      await this.scanApprovalRange(filter, chunkStart, chunkEnd);
+      if (chunkStart === chunkEnd) break;
+      await this.scanApprovalChunk(filter, chunkStart, chunkEnd);
     }
   }
-  private async scanApprovalRange(filter: ethers.ContractEventName, fromBlock: number, toBlock: number) {
+  private async scanApprovalChunk(filter: ethers.ContractEventName, fromBlock: number, toBlock: number) {
+    if (fromBlock >= toBlock) throw new Error("Approval log chunks must span at least two blocks");
+
     let events;
     let lastError: unknown;
 
@@ -100,16 +105,12 @@ export class WalletMonitor {
       } catch (error) {
         if (!isRateLimitError(error)) throw error;
         lastError = error;
-        if (attempt + 1 < rateLimitRetryAttempts) await wait(1_000 * 2 ** attempt);
+        if (attempt + 1 < rateLimitRetryAttempts) await waitForRateLimitRetry(attempt);
       }
     }
 
     if (!events) {
-      if (fromBlock === toBlock) throw lastError;
-      const midpoint = Math.floor((fromBlock + toBlock) / 2);
-      await this.scanApprovalRange(filter, fromBlock, midpoint);
-      await this.scanApprovalRange(filter, midpoint + 1, toBlock);
-      return;
+      throw lastError;
     }
 
     const owners = new Set<string>();
